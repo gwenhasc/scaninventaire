@@ -361,26 +361,14 @@ else:
         if key_rm not in st.session_state:
             st.session_state[key_rm] = 1
 
-        r1, r2, r3 = cols[5].columns([1, 2, 1])
-
-        with r1:
-            if st.button("➖", key=f"rmminus_{key_rm}", use_container_width=True):
-                st.session_state[key_rm] = max(1, int(st.session_state[key_rm]) - 1)
-
-        with r2:
-            # Editable au clavier
-            st.session_state[key_rm] = st.number_input(
-                "Retirer",
-                min_value=1,
-                step=1,
-                value=int(st.session_state[key_rm]),
-                key=f"{key_rm}_input",
-                label_visibility="collapsed",
-            )
-
-        with r3:
-            if st.button("➕", key=f"rmplus_{key_rm}", use_container_width=True):
-                st.session_state[key_rm] = int(st.session_state[key_rm]) + 1
+st.session_state[key_rm] = st.number_input(
+    "Retirer",
+    min_value=1,
+    step=1,
+    value=int(st.session_state[key_rm]),
+    key=f"{key_rm}_input",
+    label_visibility="collapsed",
+)
 
         if cols[6].button("Retirer", key=f"remove_{st.session_state.current_session}_{ean1}"):
             remove_qty(ean1, int(st.session_state[key_rm]))
