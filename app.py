@@ -7,10 +7,13 @@ st.title("📦 Inventaire — Scan EAN → Compteur → Export CSV")
 
 REQUIRED_COLS = ["EAN 1", "EAN 2", "Reference", "Name", "Couleur", "Taille", "Pointure"]
 
+
+# ------------------ Utils ------------------
 def normalize_code(x) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     return str(x).strip().replace(" ", "").replace("\n", "").replace("\r", "")
+
 
 def load_products(file) -> pd.DataFrame:
     df = pd.read_csv(file, dtype=str).fillna("")
@@ -27,9 +30,12 @@ def load_products(file) -> pd.DataFrame:
     if df["EAN 1"].duplicated().any():
         dups = df[df["EAN 1"].duplicated(keep=False)]["EAN 1"].unique().tolist()
         raise ValueError(f"Doublons détectés dans EAN 1 : {dups[:10]}{'...' if len(dups)>10 else ''}")
+
     return df
 
+
 def build_alias_map(df: pd.DataFrame) -> dict:
+    # code scanné (EAN1 ou EAN2) -> EAN1
     m = {}
     for _, row in df.iterrows():
         ean1 = row["EAN 1"]
@@ -38,9 +44,12 @@ def build_alias_map(df: pd.DataFrame) -> dict:
             m[ean1] = ean1
         if ean2:
             if ean2 in m and m[ean2] != ean1:
-                raise ValueError(f"Conflit : EAN 2 '{ean2}' pointe vers plusieurs EAN 1 ({m[ean2]} et {ean1}).")
+                raise ValueError(
+                    f"Conflit : EAN 2 '{ean2}' pointe vers plusieurs EAN 1 ({m[ean2]} et {ean1})."
+                )
             m[ean2] = ean1
     return m
+
 
 def product_label(row: pd.Series) -> str:
     size = (row.get("Taille", "") or "").strip()
@@ -53,6 +62,8 @@ def product_label(row: pd.Series) -> str:
         return f"Pointure {shoe}"
     return ""
 
+
+# ------------------ State ------------------
 def init_state():
     if "products" not in st.session_state:
         st.session_state.products = None
@@ -60,7 +71,9 @@ def init_state():
         st.session_state.alias_map = {}
 
     if "sessions" not in st.session_state:
-        st.session_state.sessions = {"Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}}
+        st.session_state.sessions = {
+            "Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}
+        }
     if "current_session" not in st.session_state:
         st.session_state.current_session = "Inventaire 1"
 
@@ -71,27 +84,33 @@ def init_state():
         st.session_state.scan_code = ""
 
     if "add_qty" not in st.session_state:
-        st.session_state.add_qty = 1
+        st.session_state["add_qty"] = 1
 
     if "sound_enabled" not in st.session_state:
         st.session_state.sound_enabled = False
 
-    # pour forcer le rerender du composant son
     if "sound_tick" not in st.session_state:
         st.session_state.sound_tick = 0
 
+
 init_state()
 
-# ------------------ SON (WebAudio) ------------------
+
+# ------------------ Sound (WebAudio) ------------------
 def play_sound(kind: str):
-    """Beep via WebAudio. Nécessite souvent 1 clic utilisateur au préalable."""
-    if not st.session_state.sound_enabled:
+    """
+    Beep via WebAudio.
+    ⚠️ Chrome/Edge peuvent bloquer tant que l'utilisateur n'a pas cliqué 1x sur la page.
+    """
+    if not st.session_state.get("sound_enabled", False):
         return
 
     st.session_state.sound_tick += 1
-    freq = 880 if kind == "ok" else 220
-    dur = 0.10 if kind == "ok" else 0.18
     tick = st.session_state.sound_tick
+
+    freq = 880 if kind == "ok" else 220
+    dur_ms = 100 if kind == "ok" else 180
+    gain = 0.08 if kind == "ok" else 0.10
 
     html = f"""
     <div id="beep-{tick}"></div>
@@ -104,21 +123,20 @@ def play_sound(kind: str):
           const g = ctx.createGain();
           o.type = "sine";
           o.frequency.value = {freq};
-          g.gain.value = 0.08;
+          g.gain.value = {gain};
           o.connect(g);
           g.connect(ctx.destination);
           o.start();
           setTimeout(() => {{
             o.stop();
             ctx.close();
-          }}, {int(dur*1000)});
-        }} catch (e) {{
-          // ignore
-        }}
+          }}, {dur_ms});
+        }} catch (e) {{}}
       }})();
     </script>
     """
     st.components.v1.html(html, height=0)
+
 
 # ---------------- Sidebar: produits + dossiers + son ----------------
 st.sidebar.header("⚙️ Configuration")
@@ -150,7 +168,9 @@ session_names = list(st.session_state.sessions.keys())
 st.session_state.current_session = st.sidebar.selectbox(
     "Choisir un dossier",
     session_names,
-    index=session_names.index(st.session_state.current_session) if st.session_state.current_session in session_names else 0
+    index=session_names.index(st.session_state.current_session)
+    if st.session_state.current_session in session_names
+    else 0,
 )
 
 new_name = st.sidebar.text_input("Nouveau dossier", placeholder="Ex: Woluwe - 20/02")
@@ -168,7 +188,11 @@ with cA:
             st.sidebar.warning("Donne un nom au dossier.")
 with cB:
     if st.button("🧹 Reset", use_container_width=True):
-        st.session_state.sessions[st.session_state.current_session] = {"counts": {}, "scan_log": [], "unknown": {}}
+        st.session_state.sessions[st.session_state.current_session] = {
+            "counts": {},
+            "scan_log": [],
+            "unknown": {},
+        }
         st.sidebar.success("Dossier réinitialisé.")
 
 can_delete = len(st.session_state.sessions) > 1
@@ -183,15 +207,16 @@ st.sidebar.divider()
 st.sidebar.subheader("🔊 Sons")
 st.session_state.sound_enabled = st.sidebar.checkbox("Activer sons OK/Erreur", value=st.session_state.sound_enabled)
 
-test1, test2 = st.sidebar.columns(2)
-with test1:
+t1, t2 = st.sidebar.columns(2)
+with t1:
     if st.button("Test OK", use_container_width=True):
         play_sound("ok")
-with test2:
+with t2:
     if st.button("Test Err", use_container_width=True):
         play_sound("err")
 
-st.sidebar.caption("Si le son ne sort pas: clique 1x dans la page (Chrome bloque l’autoplay), puis reteste.")
+st.sidebar.caption("Si aucun son: clique 1x dans la page (Chrome bloque l’autoplay), puis reteste.")
+
 
 # ----- dossier courant -----
 cur = st.session_state.sessions[st.session_state.current_session]
@@ -199,7 +224,8 @@ counts = cur["counts"]
 scan_log = cur["scan_log"]
 unknown = cur["unknown"]
 
-# ---------------- Fonctions scan / retirer ----------------
+
+# ---------------- Actions ----------------
 def register_scan(raw_code: str, qty: int):
     code = normalize_code(raw_code)
     if not code:
@@ -221,9 +247,7 @@ def register_scan(raw_code: str, qty: int):
         alias_txt = f" (alias {code} → {ean1})" if is_alias else f" ({ean1})"
         msg = f"✅ +{qty} — {prod['Name']} — {prod['Couleur']} — {extra}{alias_txt}"
 
-        scan_log.append({
-            "timestamp": ts, "action": "ADD", "code_scanné": code, "ean1": ean1, "qty": qty
-        })
+        scan_log.append({"timestamp": ts, "action": "ADD", "code_scanné": code, "ean1": ean1, "qty": qty})
 
         st.session_state.last_scan = {"status": "ok", "message": msg}
         st.toast(msg, icon="✅")
@@ -232,13 +256,12 @@ def register_scan(raw_code: str, qty: int):
         unknown[code] = unknown.get(code, 0) + qty
         msg = f"⛔ +{qty} — Code inconnu : {code}"
 
-        scan_log.append({
-            "timestamp": ts, "action": "UNKNOWN", "code_scanné": code, "ean1": "", "qty": qty
-        })
+        scan_log.append({"timestamp": ts, "action": "UNKNOWN", "code_scanné": code, "ean1": "", "qty": qty})
 
         st.session_state.last_scan = {"status": "err", "message": msg}
         st.toast(msg, icon="⛔")
         play_sound("err")
+
 
 def remove_qty(ean1: str, qty: int):
     qty = int(qty) if qty else 1
@@ -250,9 +273,7 @@ def remove_qty(ean1: str, qty: int):
         counts.pop(ean1, None)
 
     ts = datetime.now().isoformat(timespec="seconds")
-    scan_log.append({
-        "timestamp": ts, "action": "REMOVE", "code_scanné": "", "ean1": ean1, "qty": qty
-    })
+    scan_log.append({"timestamp": ts, "action": "REMOVE", "code_scanné": "", "ean1": ean1, "qty": qty})
 
     prod = products.loc[products["EAN 1"] == ean1].iloc[0]
     extra = product_label(prod)
@@ -261,7 +282,8 @@ def remove_qty(ean1: str, qty: int):
     st.toast(msg, icon="➖")
     play_sound("ok")
 
-# ---------------- UI Scan (ajout direct + qty +/-) ----------------
+
+# ---------------- UI Scan ----------------
 st.subheader("🔎 Scan (ajout direct)")
 
 last = st.session_state.last_scan
@@ -276,33 +298,52 @@ left, right = st.columns([3, 2])
 
 with right:
     st.markdown("**Quantité ajout**")
-    q1, q2, q3 = st.columns([1, 1, 2])
-    with q1:
-        if st.button("−", use_container_width=True):
-            st.session_state.add_qty = max(1, int(st.session_state.add_qty) - 1)
-    with q2:
-        if st.button("+", use_container_width=True):
-            st.session_state.add_qty = int(st.session_state.add_qty) + 1
-    with q3:
-        st.metric(label="Qté", value=int(st.session_state.add_qty))
+    qa1, qa2, qa3 = st.columns([1, 1, 1])
+
+    with qa1:
+        if st.button("➖", key="add_minus", use_container_width=True):
+            st.session_state["add_qty"] = max(1, int(st.session_state.get("add_qty", 1)) - 1)
+
+    with qa2:
+        st.markdown(
+            f"""
+            <div style='text-align:center;
+            font-size:20px;
+            border:1px solid #444;
+            border-radius:6px;
+            padding:6px;
+            width:54px;
+            margin:auto;'>
+            {int(st.session_state.get("add_qty", 1))}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with qa3:
+        if st.button("➕", key="add_plus", use_container_width=True):
+            st.session_state["add_qty"] = int(st.session_state.get("add_qty", 1)) + 1
+
 
 def on_scan_change():
-    code = st.session_state.scan_code
-    qty = int(st.session_state.add_qty)  # <-- lit la valeur au moment du scan
+    code = st.session_state.get("scan_code", "")
+    qty = int(st.session_state.get("add_qty", 1))
     register_scan(code, qty=qty)
     st.session_state.scan_code = ""
+
 
 with left:
     st.text_input(
         "Champ de scan (ton scanner agit comme un clavier)",
         key="scan_code",
         placeholder="Scanne ici…",
-        on_change=on_scan_change
+        on_change=on_scan_change,
     )
 
 st.caption("Si ton scanner n’envoie pas ENTER, configure-le pour suffixer un retour (CR/LF).")
 
-# ---------------- Affichage: uniquement scannés + retirer +/- ----------------
+
+# ---------------- Liste scannés uniquement + retirer ----------------
 st.divider()
 st.subheader(f"📋 Articles scannés — {st.session_state.current_session}")
 
@@ -334,20 +375,35 @@ else:
         cols[3].write(extra)
         cols[4].write(int(row["Quantite"]))
 
-        # Retirer qty avec +/- (plus simple que taper)
         key_rm = f"rmqty_{st.session_state.current_session}_{ean1}"
         if key_rm not in st.session_state:
             st.session_state[key_rm] = 1
 
-        b1, b2, b3 = cols[5].columns([1, 1, 2])
+        b1, b2, b3 = cols[5].columns([1, 1, 1])
+
         with b1:
-            if st.button("−", key=f"rmminus_{key_rm}", use_container_width=True):
+            if st.button("➖", key=f"rmminus_{key_rm}", use_container_width=True):
                 st.session_state[key_rm] = max(1, int(st.session_state[key_rm]) - 1)
+
         with b2:
-            if st.button("+", key=f"rmplus_{key_rm}", use_container_width=True):
-                st.session_state[key_rm] = int(st.session_state[key_rm]) + 1
+            st.markdown(
+                f"""
+                <div style='text-align:center;
+                font-size:18px;
+                border:1px solid #444;
+                border-radius:6px;
+                padding:5px;
+                width:54px;
+                margin:auto;'>
+                {int(st.session_state[key_rm])}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
         with b3:
-            st.metric("Qté", int(st.session_state[key_rm]))
+            if st.button("➕", key=f"rmplus_{key_rm}", use_container_width=True):
+                st.session_state[key_rm] = int(st.session_state[key_rm]) + 1
 
         if cols[6].button("Retirer", key=f"remove_{st.session_state.current_session}_{ean1}"):
             remove_qty(ean1, int(st.session_state[key_rm]))
@@ -362,7 +418,7 @@ else:
             data=subset.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"inventaire_{st.session_state.current_session}.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
         )
     with ex2:
         log_df = pd.DataFrame(scan_log)
@@ -371,25 +427,28 @@ else:
             data=log_df.to_csv(index=False).encode("utf-8-sig") if not log_df.empty else "timestamp,action,code_scanné,ean1,qty\n",
             file_name=f"scan_log_{st.session_state.current_session}.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
         )
     with ex3:
         unk_df = (
             pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()])
             .sort_values("quantite", ascending=False)
-            if unknown else pd.DataFrame(columns=["code_scanné", "quantite"])
+            if unknown
+            else pd.DataFrame(columns=["code_scanné", "quantite"])
         )
         st.download_button(
             "⬇️ Export inconnus",
             data=unk_df.to_csv(index=False).encode("utf-8-sig"),
             file_name=f"codes_inconnus_{st.session_state.current_session}.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
         )
 
 with st.expander("⚠️ Voir les codes inconnus"):
     if unknown:
-        unk_df = pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()]).sort_values("quantite", ascending=False)
+        unk_df = pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()]).sort_values(
+            "quantite", ascending=False
+        )
         st.dataframe(unk_df, use_container_width=True, hide_index=True)
     else:
         st.info("Aucun code inconnu.")
