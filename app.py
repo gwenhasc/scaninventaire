@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import base64
 
 st.set_page_config(page_title="Inventaire scan EAN", layout="wide")
 st.title("📦 Inventaire — Scan EAN → Compteur → Export CSV")
@@ -19,6 +18,7 @@ def load_products(file) -> pd.DataFrame:
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise ValueError(f"Colonnes manquantes : {missing}")
+
     df["EAN 1"] = df["EAN 1"].apply(normalize_code)
     df["EAN 2"] = df["EAN 2"].apply(normalize_code)
 
@@ -53,27 +53,6 @@ def product_label(row: pd.Series) -> str:
         return f"Pointure {shoe}"
     return ""
 
-# --- Sons (bips) : petits WAV en base64
-# (Sons simples; si tu veux un vrai "bip scanner", je peux te mettre un autre wav)
-SOUND_OK_WAV_B64 = (
-    "UklGRrQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YZAAAAA="
-)
-SOUND_ERR_WAV_B64 = (
-    "UklGRrQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YbAAAAA="
-)
-
-def play_sound(kind: str):
-    # Certains navigateurs bloquent autoplay sans interaction utilisateur
-    if not st.session_state.get("sound_enabled", False):
-        return
-    b64 = SOUND_OK_WAV_B64 if kind == "ok" else SOUND_ERR_WAV_B64
-    audio_html = f"""
-    <audio autoplay>
-      <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-    </audio>
-    """
-    st.components.v1.html(audio_html, height=0)
-
 def init_state():
     if "products" not in st.session_state:
         st.session_state.products = None
@@ -81,9 +60,7 @@ def init_state():
         st.session_state.alias_map = {}
 
     if "sessions" not in st.session_state:
-        st.session_state.sessions = {
-            "Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}
-        }
+        st.session_state.sessions = {"Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}}
     if "current_session" not in st.session_state:
         st.session_state.current_session = "Inventaire 1"
 
@@ -99,9 +76,51 @@ def init_state():
     if "sound_enabled" not in st.session_state:
         st.session_state.sound_enabled = False
 
+    # pour forcer le rerender du composant son
+    if "sound_tick" not in st.session_state:
+        st.session_state.sound_tick = 0
+
 init_state()
 
-# ---------------- Sidebar: chargement produits + dossiers ----------------
+# ------------------ SON (WebAudio) ------------------
+def play_sound(kind: str):
+    """Beep via WebAudio. Nécessite souvent 1 clic utilisateur au préalable."""
+    if not st.session_state.sound_enabled:
+        return
+
+    st.session_state.sound_tick += 1
+    freq = 880 if kind == "ok" else 220
+    dur = 0.10 if kind == "ok" else 0.18
+    tick = st.session_state.sound_tick
+
+    html = f"""
+    <div id="beep-{tick}"></div>
+    <script>
+      (function() {{
+        try {{
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          const ctx = new AudioContext();
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = {freq};
+          g.gain.value = 0.08;
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start();
+          setTimeout(() => {{
+            o.stop();
+            ctx.close();
+          }}, {int(dur*1000)});
+        }} catch (e) {{
+          // ignore
+        }}
+      }})();
+    </script>
+    """
+    st.components.v1.html(html, height=0)
+
+# ---------------- Sidebar: produits + dossiers + son ----------------
 st.sidebar.header("⚙️ Configuration")
 prod_file = st.sidebar.file_uploader("Importer produits.csv", type=["csv"])
 
@@ -152,36 +171,41 @@ with cB:
         st.session_state.sessions[st.session_state.current_session] = {"counts": {}, "scan_log": [], "unknown": {}}
         st.sidebar.success("Dossier réinitialisé.")
 
-# Supprimer dossier
-st.sidebar.caption("⚠️ Suppression irréversible du dossier.")
 can_delete = len(st.session_state.sessions) > 1
 if st.sidebar.button("🗑️ Supprimer ce dossier", use_container_width=True, disabled=not can_delete):
     to_del = st.session_state.current_session
-    if len(st.session_state.sessions) <= 1:
-        st.sidebar.warning("Impossible de supprimer le dernier dossier.")
-    else:
-        st.session_state.sessions.pop(to_del, None)
-        st.session_state.current_session = list(st.session_state.sessions.keys())[0]
-        st.sidebar.success(f"Dossier supprimé : {to_del}")
-        st.rerun()
+    st.session_state.sessions.pop(to_del, None)
+    st.session_state.current_session = list(st.session_state.sessions.keys())[0]
+    st.sidebar.success(f"Dossier supprimé : {to_del}")
+    st.rerun()
 
 st.sidebar.divider()
 st.sidebar.subheader("🔊 Sons")
 st.session_state.sound_enabled = st.sidebar.checkbox("Activer sons OK/Erreur", value=st.session_state.sound_enabled)
 
-# Raccourcis vers dossier courant
+test1, test2 = st.sidebar.columns(2)
+with test1:
+    if st.button("Test OK", use_container_width=True):
+        play_sound("ok")
+with test2:
+    if st.button("Test Err", use_container_width=True):
+        play_sound("err")
+
+st.sidebar.caption("Si le son ne sort pas: clique 1x dans la page (Chrome bloque l’autoplay), puis reteste.")
+
+# ----- dossier courant -----
 cur = st.session_state.sessions[st.session_state.current_session]
 counts = cur["counts"]
 scan_log = cur["scan_log"]
 unknown = cur["unknown"]
 
 # ---------------- Fonctions scan / retirer ----------------
-def register_scan(raw_code: str, qty: int = 1):
+def register_scan(raw_code: str, qty: int):
     code = normalize_code(raw_code)
     if not code:
         return
 
-    qty = int(qty)
+    qty = int(qty) if qty else 1
     if qty <= 0:
         qty = 1
 
@@ -198,11 +222,7 @@ def register_scan(raw_code: str, qty: int = 1):
         msg = f"✅ +{qty} — {prod['Name']} — {prod['Couleur']} — {extra}{alias_txt}"
 
         scan_log.append({
-            "timestamp": ts,
-            "action": "ADD",
-            "code_scanné": code,
-            "ean1": ean1,
-            "qty": qty
+            "timestamp": ts, "action": "ADD", "code_scanné": code, "ean1": ean1, "qty": qty
         })
 
         st.session_state.last_scan = {"status": "ok", "message": msg}
@@ -213,11 +233,7 @@ def register_scan(raw_code: str, qty: int = 1):
         msg = f"⛔ +{qty} — Code inconnu : {code}"
 
         scan_log.append({
-            "timestamp": ts,
-            "action": "UNKNOWN",
-            "code_scanné": code,
-            "ean1": "",
-            "qty": qty
+            "timestamp": ts, "action": "UNKNOWN", "code_scanné": code, "ean1": "", "qty": qty
         })
 
         st.session_state.last_scan = {"status": "err", "message": msg}
@@ -225,10 +241,8 @@ def register_scan(raw_code: str, qty: int = 1):
         play_sound("err")
 
 def remove_qty(ean1: str, qty: int):
-    qty = int(qty)
-    if qty <= 0:
-        return
-    if ean1 not in counts:
+    qty = int(qty) if qty else 1
+    if qty <= 0 or ean1 not in counts:
         return
 
     counts[ean1] -= qty
@@ -237,11 +251,7 @@ def remove_qty(ean1: str, qty: int):
 
     ts = datetime.now().isoformat(timespec="seconds")
     scan_log.append({
-        "timestamp": ts,
-        "action": "REMOVE",
-        "code_scanné": "",
-        "ean1": ean1,
-        "qty": qty
+        "timestamp": ts, "action": "REMOVE", "code_scanné": "", "ean1": ean1, "qty": qty
     })
 
     prod = products.loc[products["EAN 1"] == ean1].iloc[0]
@@ -251,7 +261,7 @@ def remove_qty(ean1: str, qty: int):
     st.toast(msg, icon="➖")
     play_sound("ok")
 
-# ---------------- UI Scan (ajout direct) ----------------
+# ---------------- UI Scan (ajout direct + qty +/-) ----------------
 st.subheader("🔎 Scan (ajout direct)")
 
 last = st.session_state.last_scan
@@ -262,17 +272,27 @@ elif last["status"] == "err":
 else:
     st.info("Clique dans le champ puis scanne. Le scan s’ajoute automatiquement.")
 
-c1, c2 = st.columns([2, 1])
+left, right = st.columns([3, 2])
 
-with c2:
-    st.number_input("Quantité ajout", min_value=1, value=st.session_state.add_qty, step=1, key="add_qty")
+with right:
+    st.markdown("**Quantité ajout**")
+    q1, q2, q3 = st.columns([1, 1, 2])
+    with q1:
+        if st.button("−", use_container_width=True):
+            st.session_state.add_qty = max(1, int(st.session_state.add_qty) - 1)
+    with q2:
+        if st.button("+", use_container_width=True):
+            st.session_state.add_qty = int(st.session_state.add_qty) + 1
+    with q3:
+        st.metric(label="Qté", value=int(st.session_state.add_qty))
 
 def on_scan_change():
     code = st.session_state.scan_code
-    register_scan(code, qty=st.session_state.add_qty)
+    qty = int(st.session_state.add_qty)  # <-- lit la valeur au moment du scan
+    register_scan(code, qty=qty)
     st.session_state.scan_code = ""
 
-with c1:
+with left:
     st.text_input(
         "Champ de scan (ton scanner agit comme un clavier)",
         key="scan_code",
@@ -282,7 +302,7 @@ with c1:
 
 st.caption("Si ton scanner n’envoie pas ENTER, configure-le pour suffixer un retour (CR/LF).")
 
-# ---------------- Affichage uniquement des articles scannés ----------------
+# ---------------- Affichage: uniquement scannés + retirer +/- ----------------
 st.divider()
 st.subheader(f"📋 Articles scannés — {st.session_state.current_session}")
 
@@ -294,40 +314,47 @@ else:
     subset["Quantite"] = subset["EAN 1"].map(counts).fillna(0).astype(int)
     subset = subset.sort_values(["Quantite", "Reference"], ascending=[False, True])
 
-    header = st.columns([2, 3, 2, 2, 1, 1, 1])
+    header = st.columns([2, 3, 2, 2, 1, 2, 1])
     header[0].markdown("**EAN 1**")
     header[1].markdown("**Produit**")
     header[2].markdown("**Couleur**")
     header[3].markdown("**Taille / Pointure**")
     header[4].markdown("**Qté**")
-    header[5].markdown("**Retirer**")
+    header[5].markdown("**Retirer Qté**")
     header[6].markdown("**Action**")
 
     for _, row in subset.iterrows():
         ean1 = row["EAN 1"]
         extra = product_label(row)
 
-        cols = st.columns([2, 3, 2, 2, 1, 1, 1])
+        cols = st.columns([2, 3, 2, 2, 1, 2, 1])
         cols[0].write(ean1)
         cols[1].write(f"{row['Name']}  ({row['Reference']})")
         cols[2].write(row["Couleur"])
         cols[3].write(extra)
         cols[4].write(int(row["Quantite"]))
 
-        # quantité à retirer par ligne (clé unique)
-        qty_key = f"rmqty_{st.session_state.current_session}_{ean1}"
-        if qty_key not in st.session_state:
-            st.session_state[qty_key] = 1
+        # Retirer qty avec +/- (plus simple que taper)
+        key_rm = f"rmqty_{st.session_state.current_session}_{ean1}"
+        if key_rm not in st.session_state:
+            st.session_state[key_rm] = 1
 
-        cols[5].number_input("", min_value=1, value=st.session_state[qty_key], step=1, key=qty_key, label_visibility="collapsed")
+        b1, b2, b3 = cols[5].columns([1, 1, 2])
+        with b1:
+            if st.button("−", key=f"rmminus_{key_rm}", use_container_width=True):
+                st.session_state[key_rm] = max(1, int(st.session_state[key_rm]) - 1)
+        with b2:
+            if st.button("+", key=f"rmplus_{key_rm}", use_container_width=True):
+                st.session_state[key_rm] = int(st.session_state[key_rm]) + 1
+        with b3:
+            st.metric("Qté", int(st.session_state[key_rm]))
 
-        if cols[6].button("Retirer", key=f"removebtn_{st.session_state.current_session}_{ean1}"):
-            remove_qty(ean1, st.session_state[qty_key])
+        if cols[6].button("Retirer", key=f"remove_{st.session_state.current_session}_{ean1}"):
+            remove_qty(ean1, int(st.session_state[key_rm]))
             st.rerun()
 
     st.divider()
 
-    # Exports
     ex1, ex2, ex3 = st.columns([1, 1, 1])
     with ex1:
         st.download_button(
@@ -347,9 +374,11 @@ else:
             use_container_width=True
         )
     with ex3:
-        unk_df = pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()]).sort_values(
-            "quantite", ascending=False
-        ) if unknown else pd.DataFrame(columns=["code_scanné", "quantite"])
+        unk_df = (
+            pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()])
+            .sort_values("quantite", ascending=False)
+            if unknown else pd.DataFrame(columns=["code_scanné", "quantite"])
+        )
         st.download_button(
             "⬇️ Export inconnus",
             data=unk_df.to_csv(index=False).encode("utf-8-sig"),
