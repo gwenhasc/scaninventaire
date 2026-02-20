@@ -299,25 +299,12 @@ left, right = st.columns([3, 2])
 with right:
     st.markdown("**Quantité ajout**")
 
-    qa1, qa2, qa3 = st.columns([1, 2, 1])
-
-    with qa1:
-        if st.button("➖", key="add_minus", use_container_width=True):
-            st.session_state["add_qty"] = max(1, int(st.session_state.get("add_qty", 1)) - 1)
-
-    with qa2:
-        # Editable au clavier directement
-        st.session_state["add_qty"] = st.number_input(
-            "Qté",
-            min_value=1,
-            step=1,
-            value=int(st.session_state.get("add_qty", 1)),
-            label_visibility="collapsed",
-        )
-
-    with qa3:
-        if st.button("➕", key="add_plus", use_container_width=True):
-            st.session_state["add_qty"] = int(st.session_state.get("add_qty", 1)) + 1
+   st.session_state["add_qty"] = st.number_input(
+    "Quantité",
+    min_value=1,
+    step=1,
+    value=int(st.session_state.get("add_qty", 1)),
+)
 
 
 def on_scan_change():
