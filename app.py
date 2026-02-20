@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import base64
 
 st.set_page_config(page_title="Inventaire scan EAN", layout="wide")
 st.title("📦 Inventaire — Scan EAN → Compteur → Export CSV")
@@ -29,7 +30,6 @@ def load_products(file) -> pd.DataFrame:
     return df
 
 def build_alias_map(df: pd.DataFrame) -> dict:
-    # code scanné (EAN1 ou EAN2) -> EAN1
     m = {}
     for _, row in df.iterrows():
         ean1 = row["EAN 1"]
@@ -42,13 +42,44 @@ def build_alias_map(df: pd.DataFrame) -> dict:
             m[ean2] = ean1
     return m
 
+def product_label(row: pd.Series) -> str:
+    size = (row.get("Taille", "") or "").strip()
+    shoe = (row.get("Pointure", "") or "").strip()
+    if size and shoe:
+        return f"Taille {size} / Pointure {shoe}"
+    if size:
+        return f"Taille {size}"
+    if shoe:
+        return f"Pointure {shoe}"
+    return ""
+
+# --- Sons (bips) : petits WAV en base64
+# (Sons simples; si tu veux un vrai "bip scanner", je peux te mettre un autre wav)
+SOUND_OK_WAV_B64 = (
+    "UklGRrQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YZAAAAA="
+)
+SOUND_ERR_WAV_B64 = (
+    "UklGRrQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YbAAAAA="
+)
+
+def play_sound(kind: str):
+    # Certains navigateurs bloquent autoplay sans interaction utilisateur
+    if not st.session_state.get("sound_enabled", False):
+        return
+    b64 = SOUND_OK_WAV_B64 if kind == "ok" else SOUND_ERR_WAV_B64
+    audio_html = f"""
+    <audio autoplay>
+      <source src="data:audio/wav;base64,{b64}" type="audio/wav">
+    </audio>
+    """
+    st.components.v1.html(audio_html, height=0)
+
 def init_state():
     if "products" not in st.session_state:
         st.session_state.products = None
     if "alias_map" not in st.session_state:
         st.session_state.alias_map = {}
 
-    # Multi-dossiers (sessions)
     if "sessions" not in st.session_state:
         st.session_state.sessions = {
             "Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}
@@ -56,19 +87,22 @@ def init_state():
     if "current_session" not in st.session_state:
         st.session_state.current_session = "Inventaire 1"
 
-    # Feedback dernier scan
     if "last_scan" not in st.session_state:
         st.session_state.last_scan = {"status": None, "message": ""}
 
-    # Champ scan
     if "scan_code" not in st.session_state:
         st.session_state.scan_code = ""
+
+    if "add_qty" not in st.session_state:
+        st.session_state.add_qty = 1
+
+    if "sound_enabled" not in st.session_state:
+        st.session_state.sound_enabled = False
 
 init_state()
 
 # ---------------- Sidebar: chargement produits + dossiers ----------------
 st.sidebar.header("⚙️ Configuration")
-
 prod_file = st.sidebar.file_uploader("Importer produits.csv", type=["csv"])
 
 if prod_file is not None:
@@ -101,8 +135,8 @@ st.session_state.current_session = st.sidebar.selectbox(
 )
 
 new_name = st.sidebar.text_input("Nouveau dossier", placeholder="Ex: Woluwe - 20/02")
-colA, colB = st.sidebar.columns(2)
-with colA:
+cA, cB = st.sidebar.columns(2)
+with cA:
     if st.button("➕ Créer", use_container_width=True):
         name = new_name.strip()
         if name and name not in st.session_state.sessions:
@@ -113,10 +147,27 @@ with colA:
             st.sidebar.warning("Ce dossier existe déjà.")
         else:
             st.sidebar.warning("Donne un nom au dossier.")
-with colB:
-    if st.button("🧹 Reset dossier", use_container_width=True):
+with cB:
+    if st.button("🧹 Reset", use_container_width=True):
         st.session_state.sessions[st.session_state.current_session] = {"counts": {}, "scan_log": [], "unknown": {}}
         st.sidebar.success("Dossier réinitialisé.")
+
+# Supprimer dossier
+st.sidebar.caption("⚠️ Suppression irréversible du dossier.")
+can_delete = len(st.session_state.sessions) > 1
+if st.sidebar.button("🗑️ Supprimer ce dossier", use_container_width=True, disabled=not can_delete):
+    to_del = st.session_state.current_session
+    if len(st.session_state.sessions) <= 1:
+        st.sidebar.warning("Impossible de supprimer le dernier dossier.")
+    else:
+        st.session_state.sessions.pop(to_del, None)
+        st.session_state.current_session = list(st.session_state.sessions.keys())[0]
+        st.sidebar.success(f"Dossier supprimé : {to_del}")
+        st.rerun()
+
+st.sidebar.divider()
+st.sidebar.subheader("🔊 Sons")
+st.session_state.sound_enabled = st.sidebar.checkbox("Activer sons OK/Erreur", value=st.session_state.sound_enabled)
 
 # Raccourcis vers dossier courant
 cur = st.session_state.sessions[st.session_state.current_session]
@@ -125,88 +176,84 @@ scan_log = cur["scan_log"]
 unknown = cur["unknown"]
 
 # ---------------- Fonctions scan / retirer ----------------
-def product_label(row: pd.Series) -> str:
-    # Affiche Taille ou Pointure selon ce qui existe
-    size = row.get("Taille", "").strip()
-    shoe = row.get("Pointure", "").strip()
-    if size and shoe:
-        extra = f"Taille {size} / Pointure {shoe}"
-    elif size:
-        extra = f"Taille {size}"
-    elif shoe:
-        extra = f"Pointure {shoe}"
-    else:
-        extra = ""
-    return extra
-
 def register_scan(raw_code: str, qty: int = 1):
     code = normalize_code(raw_code)
     if not code:
         return
+
+    qty = int(qty)
+    if qty <= 0:
+        qty = 1
 
     ts = datetime.now().isoformat(timespec="seconds")
 
     if code in alias_map:
         ean1 = alias_map[code]
         is_alias = (code != ean1)
+        counts[ean1] = counts.get(ean1, 0) + qty
 
-        counts[ean1] = counts.get(ean1, 0) + int(qty)
-
-        # infos produit
         prod = products.loc[products["EAN 1"] == ean1].iloc[0]
         extra = product_label(prod)
-
         alias_txt = f" (alias {code} → {ean1})" if is_alias else f" ({ean1})"
-        msg = f"✅ {prod['Name']} — {prod['Couleur']} — {extra}{alias_txt}  +{qty}"
+        msg = f"✅ +{qty} — {prod['Name']} — {prod['Couleur']} — {extra}{alias_txt}"
 
         scan_log.append({
             "timestamp": ts,
             "action": "ADD",
             "code_scanné": code,
             "ean1": ean1,
-            "qty": int(qty)
+            "qty": qty
         })
 
         st.session_state.last_scan = {"status": "ok", "message": msg}
         st.toast(msg, icon="✅")
+        play_sound("ok")
     else:
-        unknown[code] = unknown.get(code, 0) + int(qty)
-        msg = f"⛔ Code inconnu : {code}  +{qty}"
+        unknown[code] = unknown.get(code, 0) + qty
+        msg = f"⛔ +{qty} — Code inconnu : {code}"
+
         scan_log.append({
             "timestamp": ts,
             "action": "UNKNOWN",
             "code_scanné": code,
             "ean1": "",
-            "qty": int(qty)
+            "qty": qty
         })
+
         st.session_state.last_scan = {"status": "err", "message": msg}
         st.toast(msg, icon="⛔")
+        play_sound("err")
 
-def remove_one(ean1: str):
-    if ean1 in counts:
-        counts[ean1] -= 1
-        if counts[ean1] <= 0:
-            counts.pop(ean1, None)
+def remove_qty(ean1: str, qty: int):
+    qty = int(qty)
+    if qty <= 0:
+        return
+    if ean1 not in counts:
+        return
 
-        ts = datetime.now().isoformat(timespec="seconds")
-        scan_log.append({
-            "timestamp": ts,
-            "action": "REMOVE",
-            "code_scanné": "",
-            "ean1": ean1,
-            "qty": 1
-        })
+    counts[ean1] -= qty
+    if counts[ean1] <= 0:
+        counts.pop(ean1, None)
 
-        prod = products.loc[products["EAN 1"] == ean1].iloc[0]
-        extra = product_label(prod)
-        msg = f"➖ Retiré 1 : {prod['Name']} — {prod['Couleur']} — {extra} ({ean1})"
-        st.session_state.last_scan = {"status": "ok", "message": msg}
-        st.toast(msg, icon="➖")
+    ts = datetime.now().isoformat(timespec="seconds")
+    scan_log.append({
+        "timestamp": ts,
+        "action": "REMOVE",
+        "code_scanné": "",
+        "ean1": ean1,
+        "qty": qty
+    })
+
+    prod = products.loc[products["EAN 1"] == ean1].iloc[0]
+    extra = product_label(prod)
+    msg = f"➖ -{qty} — {prod['Name']} — {prod['Couleur']} — {extra} ({ean1})"
+    st.session_state.last_scan = {"status": "ok", "message": msg}
+    st.toast(msg, icon="➖")
+    play_sound("ok")
 
 # ---------------- UI Scan (ajout direct) ----------------
 st.subheader("🔎 Scan (ajout direct)")
 
-# Bandeau dernier scan (vert/rouge)
 last = st.session_state.last_scan
 if last["status"] == "ok":
     st.success(last["message"])
@@ -215,21 +262,25 @@ elif last["status"] == "err":
 else:
     st.info("Clique dans le champ puis scanne. Le scan s’ajoute automatiquement.")
 
+c1, c2 = st.columns([2, 1])
+
+with c2:
+    st.number_input("Quantité ajout", min_value=1, value=st.session_state.add_qty, step=1, key="add_qty")
+
 def on_scan_change():
-    # Déclenché dès que le champ change (le scanner envoie généralement ENTER)
     code = st.session_state.scan_code
-    register_scan(code, qty=1)
-    # Reset du champ dans le callback (safe)
+    register_scan(code, qty=st.session_state.add_qty)
     st.session_state.scan_code = ""
 
-st.text_input(
-    "Champ de scan (ton scanner agit comme un clavier)",
-    key="scan_code",
-    placeholder="Scanne ici…",
-    on_change=on_scan_change
-)
+with c1:
+    st.text_input(
+        "Champ de scan (ton scanner agit comme un clavier)",
+        key="scan_code",
+        placeholder="Scanne ici…",
+        on_change=on_scan_change
+    )
 
-st.caption("Astuce : si ton scanner n’envoie pas ENTER, configure-le pour suffixer un retour (CR/LF).")
+st.caption("Si ton scanner n’envoie pas ENTER, configure-le pour suffixer un retour (CR/LF).")
 
 # ---------------- Affichage uniquement des articles scannés ----------------
 st.divider()
@@ -241,37 +292,44 @@ if not scanned_ean1:
 else:
     subset = products[products["EAN 1"].isin(scanned_ean1)].copy()
     subset["Quantite"] = subset["EAN 1"].map(counts).fillna(0).astype(int)
-
-    # Tri: quantité décroissante puis référence
     subset = subset.sort_values(["Quantite", "Reference"], ascending=[False, True])
 
-    # Affichage "liste" avec bouton Retirer
-    header = st.columns([2, 3, 2, 2, 1, 1])
+    header = st.columns([2, 3, 2, 2, 1, 1, 1])
     header[0].markdown("**EAN 1**")
     header[1].markdown("**Produit**")
     header[2].markdown("**Couleur**")
     header[3].markdown("**Taille / Pointure**")
     header[4].markdown("**Qté**")
     header[5].markdown("**Retirer**")
+    header[6].markdown("**Action**")
 
     for _, row in subset.iterrows():
         ean1 = row["EAN 1"]
         extra = product_label(row)
-        cols = st.columns([2, 3, 2, 2, 1, 1])
+
+        cols = st.columns([2, 3, 2, 2, 1, 1, 1])
         cols[0].write(ean1)
         cols[1].write(f"{row['Name']}  ({row['Reference']})")
         cols[2].write(row["Couleur"])
         cols[3].write(extra)
         cols[4].write(int(row["Quantite"]))
-        if cols[5].button("Retirer 1", key=f"remove_{st.session_state.current_session}_{ean1}"):
-            remove_one(ean1)
+
+        # quantité à retirer par ligne (clé unique)
+        qty_key = f"rmqty_{st.session_state.current_session}_{ean1}"
+        if qty_key not in st.session_state:
+            st.session_state[qty_key] = 1
+
+        cols[5].number_input("", min_value=1, value=st.session_state[qty_key], step=1, key=qty_key, label_visibility="collapsed")
+
+        if cols[6].button("Retirer", key=f"removebtn_{st.session_state.current_session}_{ean1}"):
+            remove_qty(ean1, st.session_state[qty_key])
             st.rerun()
 
     st.divider()
 
     # Exports
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
+    ex1, ex2, ex3 = st.columns([1, 1, 1])
+    with ex1:
         st.download_button(
             "⬇️ Export inventaire (scannés)",
             data=subset.to_csv(index=False).encode("utf-8-sig"),
@@ -279,7 +337,7 @@ else:
             mime="text/csv",
             use_container_width=True
         )
-    with c2:
+    with ex2:
         log_df = pd.DataFrame(scan_log)
         st.download_button(
             "⬇️ Export journal scans",
@@ -288,7 +346,7 @@ else:
             mime="text/csv",
             use_container_width=True
         )
-    with c3:
+    with ex3:
         unk_df = pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()]).sort_values(
             "quantite", ascending=False
         ) if unknown else pd.DataFrame(columns=["code_scanné", "quantite"])
@@ -300,7 +358,6 @@ else:
             use_container_width=True
         )
 
-# ---------------- Optionnel : afficher inconnus ----------------
 with st.expander("⚠️ Voir les codes inconnus"):
     if unknown:
         unk_df = pd.DataFrame([{"code_scanné": k, "quantite": v} for k, v in unknown.items()]).sort_values("quantite", ascending=False)
