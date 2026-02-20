@@ -71,7 +71,9 @@ def init_state():
         st.session_state.alias_map = {}
 
     if "sessions" not in st.session_state:
-        st.session_state.sessions = {"Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}}
+        st.session_state.sessions = {
+            "Inventaire 1": {"counts": {}, "scan_log": [], "unknown": {}}
+        }
     if "current_session" not in st.session_state:
         st.session_state.current_session = "Inventaire 1"
 
@@ -108,7 +110,7 @@ def play_sound(kind: str):
 
     freq = 880 if kind == "ok" else 220
     dur_ms = 160 if kind == "ok" else 260  # plus long, volume inchangé
-    gain = 0.08 if kind == "ok" else 0.10
+    gain = 0.08 if kind == "ok" else 0.10  # inchangé
 
     html = f"""
     <div id="beep-{tick}"></div>
@@ -296,12 +298,26 @@ left, right = st.columns([3, 2])
 
 with right:
     st.markdown("**Quantité ajout**")
-    st.session_state["add_qty"] = st.number_input(
-        "Quantité",
-        min_value=1,
-        step=1,
-        value=int(st.session_state.get("add_qty", 1)),
-    )
+
+    qa1, qa2, qa3 = st.columns([1, 2, 1])
+
+    with qa1:
+        if st.button("➖", key="add_minus", use_container_width=True):
+            st.session_state["add_qty"] = max(1, int(st.session_state.get("add_qty", 1)) - 1)
+
+    with qa2:
+        # Editable au clavier directement
+        st.session_state["add_qty"] = st.number_input(
+            "Qté",
+            min_value=1,
+            step=1,
+            value=int(st.session_state.get("add_qty", 1)),
+            label_visibility="collapsed",
+        )
+
+    with qa3:
+        if st.button("➕", key="add_plus", use_container_width=True):
+            st.session_state["add_qty"] = int(st.session_state.get("add_qty", 1)) + 1
 
 
 def on_scan_change():
@@ -334,7 +350,7 @@ else:
     subset["Quantite"] = subset["EAN 1"].map(counts).fillna(0).astype(int)
     subset = subset.sort_values(["Quantite", "Reference"], ascending=[False, True])
 
-    header = st.columns([2, 3, 2, 2, 1, 2, 1])
+    header = st.columns([2, 3, 2, 2, 1, 3, 1])
     header[0].markdown("**EAN 1**")
     header[1].markdown("**Produit**")
     header[2].markdown("**Couleur**")
@@ -347,7 +363,7 @@ else:
         ean1 = row["EAN 1"]
         extra = product_label(row)
 
-        cols = st.columns([2, 3, 2, 2, 1, 2, 1])
+        cols = st.columns([2, 3, 2, 2, 1, 3, 1])
         cols[0].write(ean1)
         cols[1].write(f"{row['Name']}  ({row['Reference']})")
         cols[2].write(row["Couleur"])
@@ -358,14 +374,26 @@ else:
         if key_rm not in st.session_state:
             st.session_state[key_rm] = 1
 
-        st.session_state[key_rm] = st.number_input(
-            "Retirer",
-            min_value=1,
-            step=1,
-            value=int(st.session_state[key_rm]),
-            key=f"{key_rm}_input",
-            label_visibility="collapsed",
-        )
+        r1, r2, r3 = cols[5].columns([1, 2, 1])
+
+        with r1:
+            if st.button("➖", key=f"rmminus_{key_rm}", use_container_width=True):
+                st.session_state[key_rm] = max(1, int(st.session_state[key_rm]) - 1)
+
+        with r2:
+            # Editable au clavier
+            st.session_state[key_rm] = st.number_input(
+                "Retirer",
+                min_value=1,
+                step=1,
+                value=int(st.session_state[key_rm]),
+                key=f"{key_rm}_input",
+                label_visibility="collapsed",
+            )
+
+        with r3:
+            if st.button("➕", key=f"rmplus_{key_rm}", use_container_width=True):
+                st.session_state[key_rm] = int(st.session_state[key_rm]) + 1
 
         if cols[6].button("Retirer", key=f"remove_{st.session_state.current_session}_{ean1}"):
             remove_qty(ean1, int(st.session_state[key_rm]))
